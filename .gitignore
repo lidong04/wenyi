@@ -17,6 +17,8 @@ state/
 # Input books and generated artifacts (do not commit)
 output/
 explore/
+babeldoc-sessions/
+state-mineru/
 *.epub
 *.fb2
 *.mobi
@@ -25,6 +27,10 @@ explore/
 *.html
 *.srt
 *.docx
+
+# Windows launcher scripts (scripts/windows/): local settings and logs.
+wenyi-gui.settings.json
+artifact-debug.log
 
 # Web workspace artifacts.
 node_modules/
