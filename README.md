@@ -35,6 +35,7 @@ Whole-book understanding · Consistent terminology · Evidence-based review
 - [Interface preview](#interface-preview)
 - [Quick start](#quick-start)
 - [Supported formats](#supported-formats)
+- [Windows launcher (this fork)](#windows-launcher-this-fork)
 - [Translation pipeline](#translation-pipeline)
 - [Documentation](#documentation)
 - [Limitations](#limitations)
@@ -183,6 +184,35 @@ issues reuse the existing Review Agent Loop and Fixer against that updated text.
 Only formal segment `target` values are replaced; full history stays in the Review
 directory's `autofix/index.json`. The consolidated result, run usage, events, and
 internal records are written under `state/<book>/targets/<target-language>/reviews/review-<timestamp>/`.
+
+---
+
+## Windows launcher (this fork)
+
+This fork ships a small Windows wrapper next to the CLI, so the usual options do not have to
+be typed by hand. It lives in [`scripts/windows/`](scripts/windows/README.md):
+
+| File | Purpose |
+|---|---|
+| `wenyi-gui.cmd` | GUI: pick a document, preview the command, start the run |
+| `translate-doc.cmd` | CLI wrapper: translate, or re-export from existing state (`-Assemble`) |
+| `epub-compat.cmd` | Rewrite an exported EPUB for readers with weak MathML support (NeatReader and friends) |
+
+What it adds on top of the CLI:
+
+- The GUI defaults to target `zh`, the **BabelDOC** PDF backend, and **writing a compatible EPUB
+  copy** with formula mode `hybrid`: formulas become real Unicode text where possible, and 2D
+  structures (fractions, matrices, sums with limits) are rendered to PNG with MiKTeX.
+- `epub-compat.py` also normalises the OPF metadata, adds a cover, and gives every copy a fresh
+  `urn:uuid`, so a reader treats it as a new book instead of reusing a half-imported one.
+- Formula rendering degrades to plain Unicode text whenever MiKTeX is missing, and images are
+  deduplicated and cached, so re-runs are instant.
+- API keys stay in the environment. `config.yaml` only references them by name (`api_key_env`),
+  and nothing under `state*/`, `babeldoc-sessions/`, `output/` or the launcher's settings file is
+  tracked by git.
+
+Options and troubleshooting are documented in [`scripts/windows/README.md`](scripts/windows/README.md).
+These scripts are Windows conveniences layered on top of wenyi; they do not change the core packages.
 
 ---
 
