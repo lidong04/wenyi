@@ -507,6 +507,8 @@ if ($SelfTest) {
   } else {
     Write-Output 'layout ok: every control fits inside the window'
   }
+  Write-Output ("defaults: compatEpub={0} formulaMode={1} target={2} backend={3}" -f `
+      $compatCheck.Checked, $FormulaModes[$formulaBox.Text], $langBox.Text, $backendBox.Text)
   exit 0
 }
 
