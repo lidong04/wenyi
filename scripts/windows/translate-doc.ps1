@@ -580,6 +580,12 @@ if ($CompatEpub -and $exitCode -eq 0) {
     & $compatPy $helper $epub.FullName "--formulas=$FormulaMode"
     if ($LASTEXITCODE -ne 0) {
       Write-Host "  epub-compat.py exited with code $LASTEXITCODE (translation itself is fine)." -ForegroundColor Yellow
+    } else {
+      # 原始 .zh.epub 没有封面、带 MathML，直接导入 NeatReader 会卡在“正在添加新书”。
+      $compatName = [System.IO.Path]::GetFileNameWithoutExtension($epub.FullName) +
+        '-compat' + $epub.Extension
+      $compatPath = Join-Path $epub.DirectoryName $compatName
+      Write-Host "  导入阅读器请用这一份 / import this file: $compatPath" -ForegroundColor Green
     }
   }
 }
