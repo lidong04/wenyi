@@ -187,7 +187,13 @@ LATEX_FUNCTIONS = {
     "det", "dim", "arg", "deg", "gcd", "sup", "inf", "Pr", "mod", "TFP", "FOC", "Var", "Cov",
 }
 
-LATEX_TEXT_COMMANDS = {"text", "mathrm", "operatorname", "textit", "textbf", "texttt", "mbox", "hbox", "mathcal", "mathbf", "mathit", "mathsf"}
+# 只换字体/排版、内容原样保留的命令：取括号里的文字，别把命令名漏进正文。
+LATEX_TEXT_COMMANDS = {
+    "text", "mathrm", "operatorname", "textit", "textbf", "texttt", "mbox", "hbox",
+    "mathcal", "mathbf", "mathit", "mathsf", "mathtt",
+    "boldsymbol", "bm", "pmb", "mathbb", "mathfrak", "mathnormal", "mathup",
+    "textnormal", "textrm", "textsf", "underline", "emph", "ensuremath",
+}
 
 COMBINING_MAP = {
     "bar": "\u0304", "overline": "\u0305", "hat": "\u0302", "widehat": "\u0302",
