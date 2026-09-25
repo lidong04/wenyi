@@ -355,6 +355,10 @@ def translations_from_store(store) -> tuple[str, str, dict[str, str]]:
                 continue
             text = segment.target if segment.target is not None else segment.source
             if text is None or not str(text).strip():
+                # The bridge requires one non-empty entry per paragraph, so an empty
+                # translation must not drop the paragraph (that blocks the export).
+                text = segment.source
+            if text is None or not str(text).strip():
                 continue
             mapping[str(pid)] = str(text)
     if not mapping:
