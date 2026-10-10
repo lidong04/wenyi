@@ -114,11 +114,30 @@ function Get-Slug([string]$Name) {
   return $slug
 }
 
-function Test-PythonModule([string]$Python, [string]$Module) {
-  # 用 importlib 探测而不是真的 import：WeasyPrint 缺 GTK 时 import 会直接抛错。
-  & $Python -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('$Module') else 1)" 2>$null |
-    Out-Null
+function Test-PythonImport([string]$Python, [string]$Module) {
+  # 真导入一次：WeasyPrint 装了但缺 GTK/Pango 时，find_spec 看不出来，import 才会报错。
+  & $Python -c "import $Module" 2>$null | Out-Null
   return ($LASTEXITCODE -eq 0)
+}
+
+function Enable-WeasyPrint {
+  # WeasyPrint 需要 GTK/Pango 原生库。找到就把目录指给它，用户不必自己配 PATH。
+  if ($env:WEASYPRINT_DLL_DIRECTORIES) { return }
+  $candidates = @(
+    (Join-Path $env:LOCALAPPDATA 'GTK3-Runtime'),
+    'C:\Program Files\GTK3-Runtime Win64',
+    (Join-Path ${env:ProgramFiles(x86)} 'GTK3-Runtime Win64')
+  )
+  foreach ($root in $candidates) {
+    if (-not $root) { continue }
+    $bin = Join-Path $root 'bin'
+    if (-not (Test-Path -LiteralPath (Join-Path $bin 'libgobject-2.0-0.dll'))) { continue }
+    $env:WEASYPRINT_DLL_DIRECTORIES = $bin
+    $fonts = Join-Path $root 'etc\fonts'
+    if (Test-Path -LiteralPath (Join-Path $fonts 'fonts.conf')) { $env:FONTCONFIG_PATH = $fonts }
+    Write-Host "WeasyPrint GTK runtime: $bin" -ForegroundColor DarkGray
+    return
+  }
 }
 
 function Get-ContainerKind([string]$Path) {
@@ -277,9 +296,10 @@ if ($Out) { $ExportArgs += @('--out', $Out) }
 # 打印 HTML 管道（WeasyPrint 或 fpdf2）。缺引擎时在开跑前就拦住，别等一小时才发现。
 $PdfEngineName = ''
 if ($Format -eq 'pdf' -and -not $UsesBridge) {
-  if (Test-PythonModule $WenyiPy 'weasyprint') {
+  Enable-WeasyPrint
+  if (Test-PythonImport $WenyiPy 'weasyprint') {
     $PdfEngineName = 'weasyprint'
-  } elseif (Test-PythonModule $WenyiPy 'fpdf') {
+  } elseif (Test-PythonImport $WenyiPy 'fpdf') {
     $PdfEngineName = 'fpdf2'
     $ExportArgs += @('--pdf-engine', 'fpdf2')
   } else {
@@ -301,7 +321,8 @@ if ($IsPdf) {
   Write-Host "PDF backend  : $backendNote"
 }
 Write-Host "State root   : $StateDir"
-Write-Host "Export format: $(if ($Format) { $Format } else { 'auto' })"
+$EngineNote = if ($PdfEngineName) { " (PDF engine: $PdfEngineName)" } else { '' }
+Write-Host "Export format: $(if ($Format) { $Format } else { 'auto' })$EngineNote"
 Write-Host "Action       : $Action"
 Write-Host "Expected out : $OutFile"
 Write-Host ""

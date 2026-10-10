@@ -130,11 +130,20 @@
 
   ```powershell
   cd wenyi
-  uv sync --extra pdf-output-lite   # fpdf2，纯 Python，Windows 上最省事
-  uv sync --extra pdf-output        # WeasyPrint，排版更好但需要 GTK/Pango
+  uv sync --extra pdf-output --extra pdf-output-lite   # WeasyPrint + fpdf2 回退
   ```
 
-  缺引擎时脚本会在**开跑前**就报错，不会等翻译跑完才失败。
+  脚本会自动挑引擎：**能真正 import WeasyPrint 就用它**（A5 版式、页码、中文两端对齐、中英混排不断词），
+  否则退回 fpdf2（纯 Python，排版一般，长英文单词会被断开）。两个都缺时会在**开跑前**报错，
+  不会等翻译跑完才失败。
+
+  WeasyPrint 需要 GTK/Pango 原生库，脚本会自动在这些位置查找并把目录告诉它，不用手配 `PATH`：
+
+  - `%LOCALAPPDATA%\GTK3-Runtime`
+  - `C:\Program Files\GTK3-Runtime Win64`
+
+  都没有就装一个 GTK 运行时（[GTK-for-Windows-Runtime-Environment-Installer](https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer/releases)，
+  静默装到用户目录：`gtk3-runtime-*-win64.exe /S /D=%LOCALAPPDATA%\GTK3-Runtime`）。
 - **导出的文件打不开**：脚本会检查产出文件的文件头，后缀和真实内容不一致时直接提示（例如"这是 EPUB，不是 PDF"），
   不再出现"EPUB 改名成 .pdf"然后被 Acrobat 判为损坏的情况。
 - **`pwsh` 不是命令**：这些脚本面向 Windows 自带的 Windows PowerShell 5.1，
