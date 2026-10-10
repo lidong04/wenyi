@@ -114,6 +114,48 @@ function Get-Slug([string]$Name) {
   return $slug
 }
 
+function Test-PythonModule([string]$Python, [string]$Module) {
+  # 用 importlib 探测而不是真的 import：WeasyPrint 缺 GTK 时 import 会直接抛错。
+  & $Python -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('$Module') else 1)" 2>$null |
+    Out-Null
+  return ($LASTEXITCODE -eq 0)
+}
+
+function Get-ContainerKind([string]$Path) {
+  # 只看文件头判断真实类型：-Out 的后缀未必等于内容（例如 EPUB 被命名成 .pdf）。
+  try {
+    $stream = [System.IO.File]::OpenRead($Path)
+    $buffer = New-Object byte[] 8
+    [void]$stream.Read($buffer, 0, 8)
+    $stream.Close()
+  } catch {
+    return ''
+  }
+  if ([System.Text.Encoding]::ASCII.GetString($buffer, 0, 5) -eq '%PDF-') { return 'pdf' }
+  if ($buffer[0] -eq 0x50 -and $buffer[1] -eq 0x4B) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    try {
+      $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+      try {
+        $entry = $zip.GetEntry('mimetype')
+        if ($entry) {
+          $reader = New-Object System.IO.StreamReader($entry.Open())
+          $mime = $reader.ReadToEnd()
+          $reader.Close()
+          if ($mime -like '*epub*') { return 'epub' }
+        }
+        if ($zip.Entries | Where-Object { $_.FullName -eq 'word/document.xml' }) { return 'docx' }
+      } finally {
+        $zip.Dispose()
+      }
+    } catch {
+      return 'zip'
+    }
+    return 'zip'
+  }
+  return 'text'
+}
+
 # --- 1. Locate the repository and the working directory ---------------------
 # 目录规则见 wenyi-paths.ps1：脚本可以放在工作目录里，也可以放在仓库里。
 $HelperDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) {
@@ -170,6 +212,27 @@ if ($AllowedExtensions -notcontains $Ext) {
   Fail "Unsupported input format '$Ext'.`n$Usage"
 }
 
+# `-Out` 的后缀就是想要的格式。只给路径不给 `-Format` 时，wenyi 按后端自己挑
+# （MinerU 的 auto 是 epub），于是会写出"EPUB 内容 + .pdf 后缀"这种打不开的文件。
+$ExtensionFormats = @{
+  '.epub' = 'epub'; '.pdf' = 'pdf'; '.docx' = 'docx'; '.txt' = 'txt'
+  '.html' = 'html'; '.htm' = 'html'; '.md' = 'markdown'; '.markdown' = 'markdown'
+}
+$FormatFromOut = ''
+$OutExt = ''
+if ($Out) {
+  $OutExt = [System.IO.Path]::GetExtension([System.IO.Path]::GetFileName($Out)).ToLowerInvariant()
+  if ($ExtensionFormats.ContainsKey($OutExt)) { $FormatFromOut = $ExtensionFormats[$OutExt] }
+}
+if ($Format -and $FormatFromOut -and $FormatFromOut -ne $Format.ToLowerInvariant()) {
+  Write-Host ("Warning: -Format {0} but -Out ends with {1}; the file will contain {0} data." -f `
+    $Format, $OutExt) -ForegroundColor Yellow
+}
+if (-not $Format -and $FormatFromOut) {
+  $Format = $FormatFromOut
+  Write-Host ("Export format: {0} (inferred from the -Out extension {1})" -f $Format, $OutExt)
+}
+
 if ($Format) {
   $FormatMatch = $AllowedFormats | Where-Object { $_ -ieq $Format } | Select-Object -First 1
   if (-not $FormatMatch) {
@@ -209,6 +272,26 @@ $Action = if ($Assemble) { 'export from existing state' } else { 'translate, the
 $ExportArgs = @()
 if ($Format) { $ExportArgs += @('--format', $Format) }
 if ($Out) { $ExportArgs += @('--out', $Out) }
+
+# PDF 输出需要渲染引擎：BabelDOC 后端由 bridge 直接产出 PDF，其余走 wenyi 自带的
+# 打印 HTML 管道（WeasyPrint 或 fpdf2）。缺引擎时在开跑前就拦住，别等一小时才发现。
+$PdfEngineName = ''
+if ($Format -eq 'pdf' -and -not $UsesBridge) {
+  if (Test-PythonModule $WenyiPy 'weasyprint') {
+    $PdfEngineName = 'weasyprint'
+  } elseif (Test-PythonModule $WenyiPy 'fpdf') {
+    $PdfEngineName = 'fpdf2'
+    $ExportArgs += @('--pdf-engine', 'fpdf2')
+  } else {
+    Fail (
+      "PDF output needs a renderer inside wenyi's venv, but neither WeasyPrint nor fpdf2 is " +
+      "installed.`n" +
+      "  cd `"$WenyiDir`" ; uv sync --extra pdf-output-lite   # fpdf2, pure Python, works on Windows`n" +
+      "  cd `"$WenyiDir`" ; uv sync --extra pdf-output        # WeasyPrint, needs GTK/Pango`n" +
+      "Or export an EPUB instead: -Format epub"
+    )
+  }
+}
 
 Write-Host "Document     : $DocumentPath"
 Write-Host "Format       : $Ext"
@@ -559,10 +642,29 @@ if ($produced.Count) {
   Write-Host "  $OutDir"
 }
 
+# 后缀和真实内容不符时，桌面软件会报"文件已损坏"，这里把真相说清楚。
+$KindByExt = @{ '.pdf' = 'pdf'; '.epub' = 'epub'; '.docx' = 'docx'; '.txt' = 'text';
+  '.md' = 'text'; '.markdown' = 'text'; '.html' = 'text'; '.htm' = 'text' }
+foreach ($file in $produced) {
+  $kind = Get-ContainerKind $file.FullName
+  $expected = $KindByExt[$file.Extension.ToLowerInvariant()]
+  if ($kind -and $expected -and $kind -ne $expected) {
+    Write-Host ("Warning: {0} contains {1} data, not {2}." -f $file.Name, $kind, $expected) -ForegroundColor Yellow
+    if ($kind -eq 'epub') {
+      Write-Host ("  It is a valid EPUB: rename it to {0}.epub, or pass -Format epub." -f `
+        [System.IO.Path]::GetFileNameWithoutExtension($file.Name)) -ForegroundColor Yellow
+    } else {
+      Write-Host ("  Pass -Format {0} (or name the output .{0}) to get what you asked for." -f `
+        $expected) -ForegroundColor Yellow
+    }
+  }
+}
+
 # --- 8. Optional: MathML-flattened EPUB for picky readers --------------------
 if ($CompatEpub -and $exitCode -eq 0) {
+  # 按内容挑 EPUB：后缀可能被 -Out 写错。
   $epubs = @($produced | Where-Object {
-      $_.Extension -ieq '.epub' -and $_.Name -notlike '*-compat.epub'
+      (Get-ContainerKind $_.FullName) -eq 'epub' -and $_.Name -notlike '*-compat.*'
     })
   if (-not $epubs.Count) {
     Write-Host "CompatEpub: no EPUB in this run's output, nothing to do." -ForegroundColor Yellow
@@ -577,15 +679,14 @@ if ($CompatEpub -and $exitCode -eq 0) {
     # Cover art needs Pillow, which lives in the bridge venv; wenyi's venv lacks it.
     $compatPy = if (Test-Path -LiteralPath $BridgePy) { $BridgePy } else { $WenyiPy }
     Write-Host "  formula mode: $FormulaMode" -ForegroundColor DarkGray
-    & $compatPy $helper $epub.FullName "--formulas=$FormulaMode"
+    $compatOut = Join-Path $epub.DirectoryName (
+      [System.IO.Path]::GetFileNameWithoutExtension($epub.FullName) + '-compat.epub')
+    & $compatPy $helper $epub.FullName $compatOut "--formulas=$FormulaMode"
     if ($LASTEXITCODE -ne 0) {
       Write-Host "  epub-compat.py exited with code $LASTEXITCODE (translation itself is fine)." -ForegroundColor Yellow
     } else {
       # 原始 .zh.epub 没有封面、带 MathML，直接导入 NeatReader 会卡在“正在添加新书”。
-      $compatName = [System.IO.Path]::GetFileNameWithoutExtension($epub.FullName) +
-        '-compat' + $epub.Extension
-      $compatPath = Join-Path $epub.DirectoryName $compatName
-      Write-Host "  导入阅读器请用这一份 / import this file: $compatPath" -ForegroundColor Green
+      Write-Host "  导入阅读器请用这一份 / import this file: $compatOut" -ForegroundColor Green
     }
   }
 }

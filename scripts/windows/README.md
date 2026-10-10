@@ -76,7 +76,7 @@
 | `-PdfBackend` | `babeldoc`（默认，保留原版式，需要本地 bridge）或 `mineru`（云端） |
 | `-StateDir` | 状态目录名，默认 `state`（MinerU 常用 `state-mineru`） |
 | `-Format` | 导出格式，默认按输入自动；可指定 `epub pdf txt html markdown docx` |
-| `-Out` | 指定输出路径 |
+| `-Out` | 指定输出路径；**后缀决定导出格式**（`.pdf` / `.epub` / `.docx` / `.txt` / `.html` / `.md`），只给后缀不给 `-Format` 也会按后缀导出 |
 | `-Assemble` | 只导出，不翻译 |
 | `-SkipReview` | 跳过审校（更快） |
 | `-CompatEpub` | 额外生成 `<文件名>-compat.epub` |
@@ -125,5 +125,17 @@
 - **封面是空白或没有封面**：封面用 PIL 画中文标题，缺中文字体会跳过（不影响正文）。
 - **`找不到 wenyi 仓库`**：脚本要求 `wenyi` 的 `pyproject.toml` 在脚本所在目录、它的
   `wenyi\` 子目录，或某个上层目录里。用 `WENYI_WORKSPACE` 指定工作目录也行。
+- **要 PDF 输出**：MinerU 后端的自动格式是 EPUB。用 `-Out xxx.pdf`（或 `-Format pdf`）会让 wenyi 走打印管道，
+  需要先在 wenyi 仓库里装一次渲染引擎：
+
+  ```powershell
+  cd wenyi
+  uv sync --extra pdf-output-lite   # fpdf2，纯 Python，Windows 上最省事
+  uv sync --extra pdf-output        # WeasyPrint，排版更好但需要 GTK/Pango
+  ```
+
+  缺引擎时脚本会在**开跑前**就报错，不会等翻译跑完才失败。
+- **导出的文件打不开**：脚本会检查产出文件的文件头，后缀和真实内容不一致时直接提示（例如"这是 EPUB，不是 PDF"），
+  不再出现"EPUB 改名成 .pdf"然后被 Acrobat 判为损坏的情况。
 - **`pwsh` 不是命令**：这些脚本面向 Windows 自带的 Windows PowerShell 5.1，
   直接双击 `.cmd`，或 `powershell -File .\translate-doc.ps1 ...`（不需要 PowerShell 7）。
