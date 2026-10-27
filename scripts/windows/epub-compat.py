@@ -24,8 +24,8 @@ import re
 import subprocess
 import sys
 import tempfile
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
 
 XHTML_NS = "http://www.w3.org/1999/xhtml"
 EPUB_NS = "http://www.idpf.org/2007/ops"
@@ -120,7 +120,9 @@ def build_cover(title: str, target: str) -> bool:
 
     footer = "机器翻译 · wenyi"
     box = draw.textbbox((0, 0), footer, font=small_font)
-    draw.text(((width - (box[2] - box[0])) / 2, height - 200), footer, font=small_font, fill=(90, 90, 95))
+    draw.text(
+        ((width - (box[2] - box[0])) / 2, height - 200), footer, font=small_font, fill=(90, 90, 95)
+    )
     image.save(target, "PNG")
     return True
 
@@ -149,75 +151,335 @@ def cover_page_xhtml(title: str) -> bytes:
 
 LATEX_SYMBOLS = {
     # 希腊字母
-    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "varepsilon": "ε",
-    "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "ϑ", "iota": "ι", "kappa": "κ",
-    "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "pi": "π", "varpi": "ϖ", "rho": "ρ",
-    "varrho": "ϱ", "sigma": "σ", "varsigma": "ς", "tau": "τ", "upsilon": "υ", "phi": "φ",
-    "varphi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω", "Gamma": "Γ", "Delta": "Δ",
-    "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ",
-    "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+    "alpha": "α",
+    "beta": "β",
+    "gamma": "γ",
+    "delta": "δ",
+    "epsilon": "ε",
+    "varepsilon": "ε",
+    "zeta": "ζ",
+    "eta": "η",
+    "theta": "θ",
+    "vartheta": "ϑ",
+    "iota": "ι",
+    "kappa": "κ",
+    "lambda": "λ",
+    "mu": "μ",
+    "nu": "ν",
+    "xi": "ξ",
+    "pi": "π",
+    "varpi": "ϖ",
+    "rho": "ρ",
+    "varrho": "ϱ",
+    "sigma": "σ",
+    "varsigma": "ς",
+    "tau": "τ",
+    "upsilon": "υ",
+    "phi": "φ",
+    "varphi": "φ",
+    "chi": "χ",
+    "psi": "ψ",
+    "omega": "ω",
+    "Gamma": "Γ",
+    "Delta": "Δ",
+    "Theta": "Θ",
+    "Lambda": "Λ",
+    "Xi": "Ξ",
+    "Pi": "Π",
+    "Sigma": "Σ",
+    "Upsilon": "Υ",
+    "Phi": "Φ",
+    "Psi": "Ψ",
+    "Omega": "Ω",
     # 运算符与关系符
-    "times": "×", "cdot": "·", "pm": "±", "mp": "∓", "approx": "≈", "neq": "≠", "ne": "≠",
-    "equiv": "≡", "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "ll": "≪", "gg": "≫",
-    "in": "∈", "notin": "∉", "subset": "⊂", "subseteq": "⊆", "supset": "⊃", "supseteq": "⊇",
-    "cup": "∪", "cap": "∩", "infty": "∞", "partial": "∂", "nabla": "∇", "ell": "ℓ",
-    "sum": "∑", "prod": "∏", "int": "∫", "iint": "∬", "oint": "∮",
-    "to": "→", "rightarrow": "→", "leftarrow": "←", "Rightarrow": "⇒", "Leftarrow": "⇐",
-    "leftrightarrow": "↔", "mapsto": "↦", "sim": "∼", "simeq": "≃", "propto": "∝", "cong": "≅",
-    "star": "⋆", "ast": "∗", "circ": "∘", "bullet": "•", "oplus": "⊕", "otimes": "⊗",
-    "forall": "∀", "exists": "∃", "neg": "¬", "land": "∧", "lor": "∨", "angle": "∠",
-    "perp": "⊥", "parallel": "∥", "dots": "…", "ldots": "…", "cdots": "⋯", "vdots": "⋮",
-    "prime": "′", "degree": "°", "lceil": "⌈", "rceil": "⌉", "lfloor": "⌊", "rfloor": "⌋",
-    "langle": "⟨", "rangle": "⟩", "mid": "|", "vert": "|", "Vert": "‖",
+    "times": "×",
+    "cdot": "·",
+    "pm": "±",
+    "mp": "∓",
+    "approx": "≈",
+    "neq": "≠",
+    "ne": "≠",
+    "equiv": "≡",
+    "leq": "≤",
+    "le": "≤",
+    "geq": "≥",
+    "ge": "≥",
+    "ll": "≪",
+    "gg": "≫",
+    "in": "∈",
+    "notin": "∉",
+    "subset": "⊂",
+    "subseteq": "⊆",
+    "supset": "⊃",
+    "supseteq": "⊇",
+    "cup": "∪",
+    "cap": "∩",
+    "infty": "∞",
+    "partial": "∂",
+    "nabla": "∇",
+    "ell": "ℓ",
+    "sum": "∑",
+    "prod": "∏",
+    "int": "∫",
+    "iint": "∬",
+    "oint": "∮",
+    "to": "→",
+    "rightarrow": "→",
+    "leftarrow": "←",
+    "Rightarrow": "⇒",
+    "Leftarrow": "⇐",
+    "leftrightarrow": "↔",
+    "mapsto": "↦",
+    "sim": "∼",
+    "simeq": "≃",
+    "propto": "∝",
+    "cong": "≅",
+    "star": "⋆",
+    "ast": "∗",
+    "circ": "∘",
+    "bullet": "•",
+    "oplus": "⊕",
+    "otimes": "⊗",
+    "forall": "∀",
+    "exists": "∃",
+    "neg": "¬",
+    "land": "∧",
+    "lor": "∨",
+    "angle": "∠",
+    "perp": "⊥",
+    "parallel": "∥",
+    "dots": "…",
+    "ldots": "…",
+    "cdots": "⋯",
+    "vdots": "⋮",
+    "prime": "′",
+    "degree": "°",
+    "lceil": "⌈",
+    "rceil": "⌉",
+    "lfloor": "⌊",
+    "rfloor": "⌋",
+    "langle": "⟨",
+    "rangle": "⟩",
+    "mid": "|",
+    "vert": "|",
+    "Vert": "‖",
     # 空白
-    "quad": " ", "qquad": " ", ",": " ", ";": " ", ":": " ", "!": "", " ": " ",
+    "quad": " ",
+    "qquad": " ",
+    ",": " ",
+    ";": " ",
+    ":": " ",
+    "!": "",
+    " ": " ",
     # 转义标点（``\&`` / ``\#`` 这类）：按书写内容保留，不要凭空丢掉
-    "&": "&", "#": "#", "%": "%", "$": "$",
+    "&": "&",
+    "#": "#",
+    "%": "%",
+    "$": "$",
 }
 
 LATEX_DROP = {
-    "left", "right", "big", "Big", "bigg", "Bigg", "bigl", "bigr", "Bigl", "Bigr",
-    "textstyle", "displaystyle", "scriptstyle", "scriptscriptstyle", "limits", "nolimits",
-    "hline", "nonumber", "notag", "noindent", "centering", " ", "protect",
-    "underbrace", "overbrace", "underset", "overset", "stackrel", "substack", "boxed",
+    "left",
+    "right",
+    "big",
+    "Big",
+    "bigg",
+    "Bigg",
+    "bigl",
+    "bigr",
+    "Bigl",
+    "Bigr",
+    "textstyle",
+    "displaystyle",
+    "scriptstyle",
+    "scriptscriptstyle",
+    "limits",
+    "nolimits",
+    "hline",
+    "nonumber",
+    "notag",
+    "noindent",
+    "centering",
+    " ",
+    "protect",
+    "underbrace",
+    "overbrace",
+    "underset",
+    "overset",
+    "stackrel",
+    "substack",
+    "boxed",
 }
 
 LATEX_FUNCTIONS = {
-    "ln", "log", "lg", "exp", "min", "max", "lim", "sin", "cos", "tan", "cot", "sec", "csc",
-    "det", "dim", "arg", "deg", "gcd", "sup", "inf", "Pr", "mod", "TFP", "FOC", "Var", "Cov",
+    "ln",
+    "log",
+    "lg",
+    "exp",
+    "min",
+    "max",
+    "lim",
+    "sin",
+    "cos",
+    "tan",
+    "cot",
+    "sec",
+    "csc",
+    "det",
+    "dim",
+    "arg",
+    "deg",
+    "gcd",
+    "sup",
+    "inf",
+    "Pr",
+    "mod",
+    "TFP",
+    "FOC",
+    "Var",
+    "Cov",
 }
 
 # 只换字体/排版、内容原样保留的命令：取括号里的文字，别把命令名漏进正文。
 LATEX_TEXT_COMMANDS = {
-    "text", "mathrm", "operatorname", "textit", "textbf", "texttt", "mbox", "hbox",
-    "mathcal", "mathbf", "mathit", "mathsf", "mathtt",
-    "boldsymbol", "bm", "pmb", "mathbb", "mathfrak", "mathnormal", "mathup",
-    "textnormal", "textrm", "textsf", "underline", "emph", "ensuremath",
+    "text",
+    "mathrm",
+    "operatorname",
+    "textit",
+    "textbf",
+    "texttt",
+    "mbox",
+    "hbox",
+    "mathcal",
+    "mathbf",
+    "mathit",
+    "mathsf",
+    "mathtt",
+    "boldsymbol",
+    "bm",
+    "pmb",
+    "mathbb",
+    "mathfrak",
+    "mathnormal",
+    "mathup",
+    "textnormal",
+    "textrm",
+    "textsf",
+    "underline",
+    "emph",
+    "ensuremath",
 }
 
 COMBINING_MAP = {
-    "bar": "\u0304", "overline": "\u0305", "hat": "\u0302", "widehat": "\u0302",
-    "tilde": "\u0303", "widetilde": "\u0303", "dot": "\u0307", "ddot": "\u0308",
-    "vec": "\u20d7", "check": "\u030c", "breve": "\u0306",
+    "bar": "\u0304",
+    "overline": "\u0305",
+    "hat": "\u0302",
+    "widehat": "\u0302",
+    "tilde": "\u0303",
+    "widetilde": "\u0303",
+    "dot": "\u0307",
+    "ddot": "\u0308",
+    "vec": "\u20d7",
+    "check": "\u030c",
+    "breve": "\u0306",
 }
 
 SUBSCRIPT_MAP = {
-    "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇",
-    "8": "₈", "9": "₉", "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
-    "a": "ₐ", "e": "ₑ", "h": "ₕ", "i": "ᵢ", "j": "ⱼ", "k": "ₖ", "l": "ₗ", "m": "ₘ",
-    "n": "ₙ", "o": "ₒ", "p": "ₚ", "r": "ᵣ", "s": "ₛ", "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ",
+    "0": "₀",
+    "1": "₁",
+    "2": "₂",
+    "3": "₃",
+    "4": "₄",
+    "5": "₅",
+    "6": "₆",
+    "7": "₇",
+    "8": "₈",
+    "9": "₉",
+    "+": "₊",
+    "-": "₋",
+    "=": "₌",
+    "(": "₍",
+    ")": "₎",
+    "a": "ₐ",
+    "e": "ₑ",
+    "h": "ₕ",
+    "i": "ᵢ",
+    "j": "ⱼ",
+    "k": "ₖ",
+    "l": "ₗ",
+    "m": "ₘ",
+    "n": "ₙ",
+    "o": "ₒ",
+    "p": "ₚ",
+    "r": "ᵣ",
+    "s": "ₛ",
+    "t": "ₜ",
+    "u": "ᵤ",
+    "v": "ᵥ",
+    "x": "ₓ",
 }
 
 SUPERSCRIPT_MAP = {
-    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷",
-    "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
-    "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "f": "ᶠ", "g": "ᵍ", "h": "ʰ",
-    "i": "ⁱ", "j": "ʲ", "k": "ᵏ", "l": "ˡ", "m": "ᵐ", "n": "ⁿ", "o": "ᵒ", "p": "ᵖ",
-    "r": "ʳ", "s": "ˢ", "t": "ᵗ", "u": "ᵘ", "v": "ᵛ", "w": "ʷ", "x": "ˣ", "y": "ʸ", "z": "ᶻ",
+    "0": "⁰",
+    "1": "¹",
+    "2": "²",
+    "3": "³",
+    "4": "⁴",
+    "5": "⁵",
+    "6": "⁶",
+    "7": "⁷",
+    "8": "⁸",
+    "9": "⁹",
+    "+": "⁺",
+    "-": "⁻",
+    "=": "⁼",
+    "(": "⁽",
+    ")": "⁾",
+    "a": "ᵃ",
+    "b": "ᵇ",
+    "c": "ᶜ",
+    "d": "ᵈ",
+    "e": "ᵉ",
+    "f": "ᶠ",
+    "g": "ᵍ",
+    "h": "ʰ",
+    "i": "ⁱ",
+    "j": "ʲ",
+    "k": "ᵏ",
+    "l": "ˡ",
+    "m": "ᵐ",
+    "n": "ⁿ",
+    "o": "ᵒ",
+    "p": "ᵖ",
+    "r": "ʳ",
+    "s": "ˢ",
+    "t": "ᵗ",
+    "u": "ᵘ",
+    "v": "ᵛ",
+    "w": "ʷ",
+    "x": "ˣ",
+    "y": "ʸ",
+    "z": "ᶻ",
     # 大写修饰字母（θ^H、A^L 这类上标）
-    "A": "ᴬ", "B": "ᴮ", "D": "ᴰ", "E": "ᴱ", "G": "ᴳ", "H": "ᴴ", "I": "ᴵ", "J": "ᴶ",
-    "K": "ᴷ", "L": "ᴸ", "M": "ᴹ", "N": "ᴺ", "O": "ᴼ", "P": "ᴾ", "R": "ᴿ", "T": "ᵀ",
-    "U": "ᵁ", "V": "ⱽ", "W": "ᵂ",
+    "A": "ᴬ",
+    "B": "ᴮ",
+    "D": "ᴰ",
+    "E": "ᴱ",
+    "G": "ᴳ",
+    "H": "ᴴ",
+    "I": "ᴵ",
+    "J": "ᴶ",
+    "K": "ᴷ",
+    "L": "ᴸ",
+    "M": "ᴹ",
+    "N": "ᴺ",
+    "O": "ᴼ",
+    "P": "ᴾ",
+    "R": "ᴿ",
+    "T": "ᵀ",
+    "U": "ᵁ",
+    "V": "ⱽ",
+    "W": "ᵂ",
 }
 
 
@@ -430,21 +692,33 @@ def safe_latex_to_unicode(tex: str) -> str:
 
 
 SAMPLE_FORMULAS = [
-    (r"A_{t}", False), (r"\Delta", False), (r"\theta^{H}", False), (r"\alpha_{L,i,t}", False),
-    (r"\bar{\mu}", False), (r"\sigma = 0.5", False), (r"\frac{s_{K,t_{0}}}{s_{L,t}}", False),
+    (r"A_{t}", False),
+    (r"\Delta", False),
+    (r"\theta^{H}", False),
+    (r"\alpha_{L,i,t}", False),
+    (r"\bar{\mu}", False),
+    (r"\sigma = 0.5", False),
+    (r"\frac{s_{K,t_{0}}}{s_{L,t}}", False),
     (r"y_{i,t} = A_{t} \alpha_{L,i,t} \ell_{i,t} + \alpha_{K,i,t} k_{i,t}", False),
     (r"K_{t} = \sum_{i} k_{i,t},\quad L_{t} = \sum_{i} \ell_{i,t}", True),
     (r"\Delta \ln w_{t} \approx m_{t} d_{t} a_{t} - \frac{s_{K,t_{0}}}{s_{L,t}}", True),
     (r"\begin{array}{r} K_{t} = \sum_{i} k_{i,t} \end{array}", True),
-    (r"p_{i,t} = \min \left\{\frac{w_{t}}{A_{t} \alpha_{L,i,t}}, \frac{r_{t}}{A_{t} \alpha_{K,i,t}}\right\}", True),
+    (
+        r"p_{i,t} = \min \left\{\frac{w_{t}}{A_{t} \alpha_{L,i,t}}, \frac{r_{t}}{A_{t} \alpha_{K,i,t}}\right\}",
+        True,
+    ),
 ]
 
 
 class FormulaRenderer:
     """用 MiKTeX 把 LaTeX 渲染成 PNG；任何一步失败都返回 None，调用方退化为文本。"""
 
-    def __init__(self, font_pt: int = FORMULA_FONT_PT, scale: int = FORMULA_SCALE,
-                 timeout: int = FORMULA_TIMEOUT) -> None:
+    def __init__(
+        self,
+        font_pt: int = FORMULA_FONT_PT,
+        scale: int = FORMULA_SCALE,
+        timeout: int = FORMULA_TIMEOUT,
+    ) -> None:
         self.font_pt = font_pt
         self.scale = scale
         self.timeout = timeout
@@ -454,6 +728,7 @@ class FormulaRenderer:
     @staticmethod
     def name_for(tex: str, display: bool) -> str:
         import hashlib
+
         digest = hashlib.sha1(("%s|%s" % (display, tex)).encode("utf-8")).hexdigest()[:8]
         return f"{FORMULA_DIR}/{digest}.png"
 
@@ -487,9 +762,7 @@ class FormulaRenderer:
         tex, _label = split_equation_tag(tex)
         if not tex:
             return None
-        key = hashlib.sha1(
-            ("%s|%s|%s" % (display, self.font_pt, tex)).encode("utf-8")
-        ).hexdigest()
+        key = hashlib.sha1(("%s|%s|%s" % (display, self.font_pt, tex)).encode("utf-8")).hexdigest()
         cached_png = os.path.join(FORMULA_CACHE, key + ".png")
         cached_meta = os.path.join(FORMULA_CACHE, key + ".txt")
         if use_cache and os.path.isfile(cached_png) and os.path.isfile(cached_meta):
@@ -514,8 +787,13 @@ class FormulaRenderer:
                 handle.write(source)
             try:
                 completed = subprocess.run(
-                    ["pdflatex", "-interaction=nonstopmode", "-halt-on-error",
-                     "--disable-installer", "formula.tex"],
+                    [
+                        "pdflatex",
+                        "-interaction=nonstopmode",
+                        "-halt-on-error",
+                        "--disable-installer",
+                        "formula.tex",
+                    ],
                     cwd=work,
                     timeout=self.timeout,
                     capture_output=True,
@@ -531,9 +809,7 @@ class FormulaRenderer:
                 from PIL import Image, ImageChops
 
                 document = fitz.open(pdf_path)
-                pixmap = document[0].get_pixmap(
-                    matrix=fitz.Matrix(self.scale, self.scale)
-                )
+                pixmap = document[0].get_pixmap(matrix=fitz.Matrix(self.scale, self.scale))
                 image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
                 document.close()
                 bbox = ImageChops.difference(
@@ -775,9 +1051,7 @@ def normalize_opf(
 
     # 公式图片也要进 manifest，严格的阅读器才肯显示。
     if manifest is not None and formula_images:
-        known_hrefs = {
-            item.get("href") for item in manifest.findall(f"{{{OPF_NS}}}item")
-        }
+        known_hrefs = {item.get("href") for item in manifest.findall(f"{{{OPF_NS}}}item")}
         for index, href in enumerate(sorted(formula_images)):
             if href in known_hrefs:
                 continue
@@ -898,7 +1172,8 @@ def main() -> int:
             print("公式渲染不可用:", renderer.reason)
             return 1
         made = compose_sample_sheet(
-            renderer, sample_sheet or os.path.join(tempfile.gettempdir(), "wenyi-formula-sample.png")
+            renderer,
+            sample_sheet or os.path.join(tempfile.gettempdir(), "wenyi-formula-sample.png"),
         )
         if not made:
             print("样张生成失败")
@@ -960,7 +1235,7 @@ def main() -> int:
             if name == "mimetype":
                 continue
             if opf_dir and name.startswith(opf_dir + "/"):
-                out_name = CONTENT_DIR + name[len(opf_dir):]
+                out_name = CONTENT_DIR + name[len(opf_dir) :]
             else:
                 out_name = name
             data = src.read(name)
@@ -988,8 +1263,6 @@ def main() -> int:
         if not display_title:
             display_title = os.path.splitext(os.path.basename(source))[0]
         print(f"封面标题: {display_title}")
-
-        import tempfile
 
         cover_bytes = None
         with tempfile.TemporaryDirectory() as tmp:
