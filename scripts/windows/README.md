@@ -15,6 +15,9 @@
 
 - Windows PowerShell 5.1（系统自带）与 `cmd.exe`。
 - wenyi 自己的虚拟环境：`wenyi\.venv`（按仓库 README 用 `uv sync` 装好）。
+- 启动层额外的 Python 包：`uv pip install -r scripts/windows/requirements-launcher.in`。
+  `uv sync` 会按锁文件清理多余包，所以每次 `uv sync` 之后都要再装一次。
+  其中 **PyMuPDF** 负责把 MiKTeX 生成的 PDF 公式渲染成图片；没有它公式会退化成纯文本。
 - 可选 **MiKTeX**（或任何提供 `pdflatex` 的 TeX 发行版）：只有「兼容 EPUB 的公式图片」
   需要它。没装也不影响使用，公式会自动退化成 Unicode 文本。
 - 可选 **wenyi-babeldoc-bridge**：只有 `-PdfBackend babeldoc`（保留原版式的 PDF 后端）

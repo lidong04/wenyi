@@ -1,0 +1,11 @@
+# Packages the Windows launcher needs on top of the wenyi workspace.
+#
+# `uv sync` installs exactly what the lockfile declares and removes everything
+# else, so these packages disappear on every sync. Re-install them afterwards:
+#
+#   uv pip install -r scripts/windows/requirements-launcher.in
+#
+# PyMuPDF renders the MiKTeX-produced PDF for 2D formulas (fractions, matrices,
+# sums with limits) into PNG for the NeatReader-friendly EPUB copy. Without it
+# every formula degrades to plain Unicode text.
+pymupdf<2
