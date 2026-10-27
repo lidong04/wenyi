@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 from abc import abstractmethod
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
-from ..retrying import EmptyResponseError
+from ..retrying import EmptyResponseError, TruncatedResponseError
 from ..transport import Messages, ProviderAdapter, RequestContext, ResolvedModel
 from ..usage import UsageSample, make_usage_sample, read_usage_int, read_usage_value
 
@@ -98,7 +97,7 @@ class OpenAICompatibleBaseClient(ProviderAdapter, Generic[OptionsT]):
                 from openai import OpenAI
 
                 self.validate_credentials()
-                api_key = os.environ.get(self.api_key_env) if self.api_key_env else None
+                api_key = self.api_key()
                 self._client = OpenAI(
                     api_key=api_key or "no-key",
                     base_url=self.base_url,
@@ -106,6 +105,10 @@ class OpenAICompatibleBaseClient(ProviderAdapter, Generic[OptionsT]):
                     max_retries=0,
                 )
         return self._client
+
+    def list_models(self) -> list[str]:
+        """Read ``GET /models``; the OpenAI SDK pages through gateways that paginate."""
+        return [str(item.id) for item in self._ensure_client().models.list() if item.id]
 
     @classmethod
     def output_limit(cls, options: BaseModel, hint: int | None, explicit: int | None) -> int | None:
@@ -155,9 +158,13 @@ class OpenAICompatibleBaseClient(ProviderAdapter, Generic[OptionsT]):
         message = choice.message
         raw_content = getattr(message, "content", None)
         content = raw_content if isinstance(raw_content, str) else ""
+        finish_reason = str(getattr(choice, "finish_reason", "")).lower()
+        if finish_reason == "length":
+            # Truncated output is not a complete answer; never treat a mid-sentence cut as success.
+            raise TruncatedResponseError(
+                "OpenAI-compatible response was truncated at the token limit"
+            )
         if not content.strip():
-            if str(getattr(choice, "finish_reason", "")).lower() == "length":
-                raise RuntimeError("OpenAI-compatible response was truncated at the token limit")
             fallback = self._json_response_fallback(model_config, message) if json_mode else None
             if fallback is None or not fallback.strip():
                 raise EmptyResponseError(f"{self.cfg.kind} response content is empty")

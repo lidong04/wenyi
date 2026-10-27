@@ -4,6 +4,7 @@ __pycache__/
 venv/
 build/
 dist/
+/release-assets/
 *.spec
 state/
 *.db
@@ -25,6 +26,8 @@ state-mineru/
 *.azw3
 *.pdf
 *.html
+!/apps/web/tests/select-harness.html
+!/apps/desktop/frontend/tests/select-harness.html
 *.srt
 *.docx
 
@@ -43,6 +46,7 @@ data/
 
 # pytest / coverage
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 

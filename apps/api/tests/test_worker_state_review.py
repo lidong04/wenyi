@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+from contextvars import copy_context
+from dataclasses import replace
 
 import pytest
-import test_storage_pg_integration as storage_tests
+from api_test_support import initialize
 from type_helpers import must
 from wenyi_api import dal
-from wenyi_api.workers import tasks
+from wenyi_api.adapters import postgres_repository
+from wenyi_api.telemetry import RedisTelemetry
+from wenyi_backend.context import current_context, use_context
+from wenyi_backend.workers import tasks
 from wenyi_core.config import Config
 from wenyi_core.llm.limits import RequestLimits, RequestStopped
 from wenyi_core.llm.providers.fake import FakeClient
-
-pg_pool = storage_tests.pg_pool
-pg_storage = storage_tests.pg_storage
 
 
 @pytest.fixture
@@ -23,7 +24,6 @@ def worker_state(pg_storage, pg_pool, monkeypatch):
     from wenyi_core.llm import factory
 
     monkeypatch.setattr(dal, "get_pool", lambda: pg_pool)
-    monkeypatch.setattr(tasks, "init_pool", lambda _: pg_pool)
     monkeypatch.setattr(tasks, "_pipeline_storage", lambda *_: pg_storage)
     monkeypatch.setattr(tasks, "redis_progress_fn", lambda *_a, **_k: lambda *_: None)
     config = Config.from_dict(
@@ -31,12 +31,13 @@ def worker_state(pg_storage, pg_pool, monkeypatch):
     )
     monkeypatch.setattr(tasks, "_build_config_for", lambda *_: config)
     monkeypatch.setattr(factory, "build_client", lambda _: FakeClient())
-    monkeypatch.setattr(
-        tasks,
-        "settings",
-        SimpleNamespace(psycopg_dsn="unused", redis_url="redis://127.0.0.1:56379/0"),
-    )
-    return pg_storage
+    context = replace(current_context(), build_client=lambda cfg: factory.build_client(cfg))
+    postgres_repository(context)._pool = pg_pool
+    telemetry = context.telemetry
+    assert isinstance(telemetry, RedisTelemetry)
+    telemetry.url = "redis://127.0.0.1:56379/0"
+    with use_context(context):
+        yield pg_storage
 
 
 def test_cancelled_requests_pause_without_recording_an_error(worker_state, monkeypatch):
@@ -144,6 +145,76 @@ def test_async_error_fallback_does_not_overwrite_a_newer_task(worker_state, monk
         asyncio.run(tasks._run("translation", pid, "old-failure", {}))
     assert must(dal.get_job(latest[0]))["status"] == "queued"
     assert must(dal.get_project(pid))["status"] == "translating"
+
+
+def test_worker_streams_time_and_usage_before_a_batch_finishes(worker_state, monkeypatch):
+    import os
+    import time
+
+    from redis import Redis
+    from wenyi_backend.routers import configuration
+    from wenyi_core.llm.usage import UsageSample
+    from wenyi_core.pipeline.runtime import PipelineRuntime
+    from wenyi_core.timing import RunTimer
+
+    redis_url = os.environ.get("WENYI_TEST_REDIS_URL")
+    if not redis_url:
+        pytest.skip("Set WENYI_TEST_REDIS_URL for live worker statistics")
+    pid = worker_state.project_id
+    monkeypatch.setattr(current_context().telemetry, "url", redis_url)
+    monkeypatch.setattr(configuration, "storage_for", lambda _: worker_state)
+    paused = True
+
+    def operation(kind, project_id, store, config, client, progress, params):
+        runtime = PipelineRuntime(config, client)
+        baseline = (store.load_usage() or {"totals": {"total_tokens": 0}})["totals"]["total_tokens"]
+        previous_seconds = (store.read_artifact("timing.json") or {}).get("total_seconds", 0)
+        with RunTimer("workflow") as timer:
+            timer.store = store
+            try:
+                client.usage.record("fast", UsageSample(4, 6, 10), "translation.body")
+                # No progress callback or chapter save occurs while the model batch is active.
+                deadline = time.monotonic() + 5
+                while True:
+                    stats = configuration.project_stats(pid)
+                    if (
+                        stats.get("usage", {}).get("totals", {}).get("total_tokens")
+                        == baseline + 10
+                    ):
+                        break
+                    assert time.monotonic() < deadline, "Worker heartbeat did not publish usage"
+                    time.sleep(0.02)
+                assert stats["live"]["run_id"] == ("first-run" if paused else "resumed-run")
+                assert stats["timing"]["total_seconds"] > previous_seconds
+                assert stats["timing"]["runs"][-1]["status"] == "running"
+                assert (store.load_usage() or {"totals": {"total_tokens": 0}})["totals"][
+                    "total_tokens"
+                ] == baseline
+                if paused:
+                    raise tasks.PauseRequested(pid)
+            finally:
+                runtime.flush_usage(store, scope="test")
+        return "done"
+
+    monkeypatch.setattr(tasks, "_book_operation", operation)
+    with Redis.from_url(redis_url) as redis:
+        try:
+            for run_id, expected_status, tokens in [
+                ("first-run", "paused", 10),
+                ("resumed-run", "done", 20),
+            ]:
+                dal.create_job(pid, "translation", run_id, run_id=run_id)
+                dal.set_project_status(pid, "translating")
+                tasks._execute("translation", pid, run_id, {})
+                assert must(dal.get_project(pid))["status"] == expected_status
+                final = configuration.project_stats(pid)
+                assert "live" not in final
+                assert final["usage"]["totals"]["total_tokens"] == tokens
+                assert len(final["timing"]["runs"]) == tokens // 10
+                assert all(row["status"] != "running" for row in final["timing"]["runs"])
+                paused = False
+        finally:
+            redis.delete(f"project:{pid}:stats")
 
 
 def _aged_export(storage, pool, run_id, status="running"):
@@ -279,19 +350,16 @@ def test_failure_does_not_leave_project_busy_when_api_briefly_owns_lock(worker_s
 def test_export_render_uses_enqueued_config_snapshot(pg_storage, pg_pool, monkeypatch, tmp_path):
     from pathlib import Path
 
-    from wenyi_api.project_service import config_document
+    from wenyi_backend.project_service import config_document
     from wenyi_core.assemble import writer
 
-    storage_tests.initialize(pg_storage, tmp_path)
+    initialize(pg_storage, tmp_path)
     pid = pg_storage.project_id
     monkeypatch.setattr(dal, "get_pool", lambda: pg_pool)
-    monkeypatch.setattr(tasks, "init_pool", lambda _: pg_pool)
     monkeypatch.setattr(tasks, "_pipeline_storage", lambda *_: pg_storage)
     monkeypatch.setattr(tasks.paths, "project_dir", lambda _: pg_storage.run_dir)
     monkeypatch.setattr(tasks.paths, "exports_dir", lambda _: str(tmp_path / pid / "exports"))
-    monkeypatch.setattr(
-        tasks, "settings", SimpleNamespace(psycopg_dsn="unused", data_dir=str(tmp_path))
-    )
+    postgres_repository(current_context())._pool = pg_pool
     original_config = Config.from_dict(
         {
             "language": {"source": "en", "target": "zh"},
@@ -341,7 +409,9 @@ def test_cancelled_export_waits_for_render_thread_to_publish(monkeypatch):
     monkeypatch.setattr(tasks, "_export_sync", render)
 
     async def run():
-        job = asyncio.create_task(tasks.run_export({}, project_id="p", export_id=1))
+        job = asyncio.create_task(
+            tasks.run_export({"backend": current_context()}, project_id="p", export_id=1)
+        )
         assert await asyncio.to_thread(started.wait, 2)
         job.cancel()
         await asyncio.sleep(0)
@@ -394,7 +464,7 @@ def test_pause_monitor_cancels_waiting_model_without_progress_callback(worker_st
         finally:
             finished.set()
 
-    thread = threading.Thread(target=execute)
+    thread = threading.Thread(target=copy_context().run, args=(execute,))
     thread.start()
     try:
         assert entered.wait(2)

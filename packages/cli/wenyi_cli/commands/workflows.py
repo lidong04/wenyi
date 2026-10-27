@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+from enum import Enum
 
 import typer
 from rich.progress import Progress
+from wenyi_core.config import PipelineConfig
 from wenyi_core.ingest.errors import IngestError
 from wenyi_core.timing import load_timing
 
@@ -20,7 +22,46 @@ from .validation import (
 )
 
 
+class TranslationMode(str, Enum):
+    standard = "standard"
+    best_of_three = "best_of_three"
+
+
 def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> None:
+    @app.command(rich_help_panel="Main workflow")
+    def parse(
+        input_path: str = typer.Argument(..., help="Source book to parse without AI"),
+    ) -> None:
+        """Parse source chapters and list the contents without AI initialization."""
+        from rich.table import Table
+        from wenyi_core.pipeline.input_preparation import (
+            locate_input_storage,
+            parse_document,
+        )
+        from wenyi_core.storage.file import FileStorage
+
+        console = context().console
+        try:
+            require_input_file(input_path, console=console)
+            config = context().load_config()
+            store, digest = locate_input_storage(input_path, config, FileStorage)
+            try:
+                with store.lock():
+                    document = parse_document(store, input_path, config, expected_sha256=digest)
+                table = Table("Chapter", "Title", "Paragraphs")
+                for chapter in document.chapters:
+                    table.add_row(
+                        str(chapter.index), chapter.title, str(len(chapter.text_segments))
+                    )
+                console.print(table)
+                console.print(f"State directory: {store.run_dir}", markup=False)
+                console.print("Source parsed. AI preparation has not been run by this command.")
+            finally:
+                store.close()
+        except (IngestError, ImportError, OSError, ValueError, RuntimeError) as error:
+            console.print(f"[red]Error: {error}[/]")
+            raise typer.Exit(1) from None
+
     def _translate_impl(
         input_path: str,
         *,
@@ -29,6 +70,7 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
         out: str | None = None,
         pdf_engine: str = "weasyprint",
         polish: bool | None = None,
+        translation_mode: TranslationMode | None = None,
         review: bool | None = None,
         mono: bool | None = None,
         bilingual: bool | None = None,
@@ -43,6 +85,7 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
                 out=out,
                 pdf_engine=pdf_engine,
                 polish=polish,
+                translation_mode=translation_mode,
                 review=review,
                 mono=mono,
                 bilingual=bilingual,
@@ -60,6 +103,7 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
         fmt: str = "epub",
         out: str | None = None,
         polish: bool | None = None,
+        translation_mode: TranslationMode | None = None,
         review: bool | None = None,
         mono: bool | None = None,
         bilingual: bool | None = None,
@@ -75,6 +119,8 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
             ignored.append("--format")
         if polish is not None:
             ignored.append("--polish/--no-polish")
+        if translation_mode is not None:
+            ignored.append("--translation-mode")
         if review is not None:
             ignored.append("--review/--no-review")
         if ignored:
@@ -121,6 +167,7 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
         out: str | None = None,
         pdf_engine: str = "weasyprint",
         polish: bool | None = None,
+        translation_mode: TranslationMode | None = None,
         review: bool | None = None,
         mono: bool | None = None,
         bilingual: bool | None = None,
@@ -136,6 +183,7 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
                 fmt=fmt or "epub",
                 out=out,
                 polish=polish,
+                translation_mode=translation_mode,
                 review=review,
                 mono=mono,
                 bilingual=bilingual,
@@ -145,8 +193,22 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
         fmt = resolve_output_format(input_path, fmt, console=console)
         pdf_engine = validate_pdf_engine(pdf_engine, console=console)
         config = context().load_config()
+        pipeline_values = config.pipeline.model_dump()
         if polish is not None:
-            config.pipeline.polish = polish
+            pipeline_values["polish"] = polish
+        if translation_mode is not None:
+            pipeline_values["translation_mode"] = translation_mode.value
+        try:
+            config.pipeline = PipelineConfig.model_validate(pipeline_values)
+        except ValueError:
+            if (
+                pipeline_values["translation_mode"] == "best_of_three"
+                and not pipeline_values["polish"]
+            ):
+                raise ValueError(
+                    "best_of_three translation mode requires pipeline.polish=true; remove --no-polish"
+                ) from None
+            raise
         if review is not None:
             config.pipeline.review = review
         if mono is not None:
@@ -290,6 +352,11 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
             "--polish/--no-polish",
             help="Override pipeline.polish to enable or disable polishing",
         ),
+        translation_mode: TranslationMode | None = typer.Option(
+            None,
+            "--translation-mode",
+            help="Book translation mode; best_of_three requires polishing",
+        ),
         review: bool | None = typer.Option(
             None,
             "--review/--no-review",
@@ -314,6 +381,7 @@ def register_workflows_commands(app: typer.Typer, context: ContextAccessor) -> N
             out=out,
             pdf_engine=pdf_engine,
             polish=polish,
+            translation_mode=translation_mode,
             review=review,
             mono=mono,
             bilingual=bilingual,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -10,10 +9,9 @@ from typing import Any, Literal
 
 from ..config import Config
 from ..glossary.store import GlossaryTerm
-from ..i18n import languages
-from ..i18n.prompts import render
 from ..llm.base import LLMClient
 from ..llm.json_parser import parse_json_result
+from ..review.models import text_hash
 from . import prompts
 from .base import Agent
 
@@ -61,11 +59,6 @@ class ProvisionalPatch:
         }
 
 
-def _sha256(text: str) -> str:
-    """Hash complete UTF-8 text with SHA-256 for optimistic shadow-patch validation."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def _dialogue_quote_pairs(text: str) -> int:
     """Count complete double-quote pairs to detect loss of existing dialogue boundaries."""
     return (
@@ -96,7 +89,7 @@ def _patch_id(
         sort_keys=True,
         separators=(",", ":"),
     )
-    return f"patch-r{round_number:02d}-{_sha256(payload)[:16]}"
+    return f"patch-r{round_number:02d}-{text_hash(payload)[:16]}"
 
 
 def _nearby_text(pairs: Sequence[tuple[str, str]]) -> str:
@@ -118,15 +111,19 @@ def _nearby_text(pairs: Sequence[tuple[str, str]]) -> str:
 
 def _glossary_text(
     relevant_glossary: Sequence[GlossaryTerm] | str,
+    *,
+    source_lang: str,
 ) -> str:
-    """Render relevant terms, or accept prelocalized read-only text from the pipeline."""
+    """Filter structured terms; legacy text remains caller-owned and is not rewritten."""
     if isinstance(relevant_glossary, str):
         return relevant_glossary.strip() or "(none)"
-    return prompts.render_glossary(list(relevant_glossary))
+    return prompts.render_glossary(list(relevant_glossary), source_lang=source_lang)
 
 
 class ReviewFixer(Agent):
     """Generate strictly validated complete-paragraph patches that cannot publish themselves."""
+
+    policy_phase = "review"
 
     def __init__(self, client: LLMClient, config: Config, *, operation: str = "review.fix"):
         super().__init__(client, config)
@@ -137,7 +134,7 @@ class ReviewFixer(Agent):
         """Return the current translation hash used by the Fixer protocol."""
         if not isinstance(target, str):
             raise ReviewFixerProtocolError("invalid_current_target")
-        return _sha256(target)
+        return text_hash(target)
 
     @staticmethod
     def _issues(
@@ -227,17 +224,12 @@ class ReviewFixer(Agent):
 
         issue_ids, issue_payload = self._issues(issues, chapter=chapter, index=index)
         before_hash = self.target_hash(current_target)
-        system = render(
+        system = self.render(
             "review_fixer_system",
             src=self.src,
             tgt=self.tgt,
-            lang_guidance=languages.translate_guidance(
-                self.src,
-                self.config.honorific_strategy,
-                self.tgt,
-            ),
         )
-        user = render(
+        user = self.render(
             "review_fixer_user",
             src=self.src,
             tgt=self.tgt,
@@ -252,7 +244,7 @@ class ReviewFixer(Agent):
                 if isinstance(chapter_digest, str) and chapter_digest.strip()
                 else "(none)"
             ),
-            glossary=_glossary_text(relevant_glossary),
+            glossary=_glossary_text(relevant_glossary, source_lang=self.src),
             nearby_pairs=_nearby_text(nearby_pairs),
             issues_json=json.dumps(issue_payload, ensure_ascii=False, indent=2),
             segment_ref=segment_ref,
@@ -296,14 +288,15 @@ class ReviewFixer(Agent):
                 {
                     "value": data,
                     "json_repaired": parsed.repaired,
+                    "json_repair_kind": parsed.repair_kind,
                 },
             )
+        if not parsed.safe_for_complete_payload:
+            raise ReviewFixerProtocolError("unsafe_json_repair")
         if not isinstance(data, dict):
             raise ReviewFixerProtocolError("response_not_object")
         if set(data) != _OUTPUT_FIELDS:
             raise ReviewFixerProtocolError("unexpected_fields")
-        if not data or list(data)[-1] != "complete":
-            raise ReviewFixerProtocolError("completion_marker_not_last")
         if data.get("complete") is not True:
             raise ReviewFixerProtocolError("completion_marker_missing")
         if data.get("segment_ref") != segment_ref:

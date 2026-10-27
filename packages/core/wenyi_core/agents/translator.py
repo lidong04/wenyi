@@ -8,9 +8,8 @@ entire paragraphs from being omitted.
 from __future__ import annotations
 
 from ..glossary.store import GlossaryTerm
-from ..i18n import languages
-from ..i18n.prompts import render
 from ..llm.json_parser import JsonParseError
+from ..llm.retrying import TruncatedResponseError
 from . import prompts
 from .base import Agent, Messages
 
@@ -105,21 +104,18 @@ class Translator(Agent):
         Returns the translations and the three-turn transcript for optional polish continuation.
         """
         n = len(sources)
-        system = render(
+        system = self.render(
             "translator_system",
             src=self.src,
             tgt=self.tgt,
-            lang_guidance=languages.translate_guidance(
-                self.src, self.config.honorific_strategy, self.tgt
-            ),
         )
-        user = render(
+        user = self.render(
             "translator_user",
             src=self.src,
             tgt=self.tgt,
             style=style or "(none)",
             book_synopsis=book_synopsis or "(none)",
-            glossary=prompts.render_glossary(glossary_terms),
+            glossary=prompts.render_glossary(glossary_terms, source_lang=self.src),
             annotation_contexts=prompts.render_annotation_contexts(
                 annotation_contexts or [[] for _ in sources]
             ),
@@ -138,6 +134,10 @@ class Translator(Agent):
         # successful responses enter alignment recovery, avoiding duplicate retries for 401/403/5xx errors.
         try:
             data, raw = self._complete_json_turn(messages, operation="translation.body")
+        except TruncatedResponseError as error:
+            raise AlignmentError(
+                "The translation response reached the output token limit"
+            ) from error
         except JsonParseError as error:
             raise AlignmentError(
                 "Cannot parse the translation JSON returned by the model"

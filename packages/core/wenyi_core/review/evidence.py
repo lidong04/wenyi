@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import unicodedata
 from collections.abc import Mapping
 from hashlib import sha256
 from threading import Lock
@@ -11,12 +10,7 @@ from typing import Any
 
 from ..glossary.store import GlossaryTerm, source_matches_text, term_match_sources
 from ..ingest.models import Chapter
-from .models import SegmentRef
-
-
-def _normalized(value: str) -> str:
-    """Normalize compatibility forms, width and case for comparing term/suggestion keys."""
-    return unicodedata.normalize("NFKC", value).casefold().strip()
+from .models import SegmentRef, normalize_value
 
 
 def _clip(value: Any, limit: int) -> str:
@@ -39,13 +33,16 @@ class BookEvidenceIndex:
         terms: list[GlossaryTerm],
         analysis: dict[str, Any],
         *,
+        source_lang: str = "auto",
         target_overrides: Mapping[tuple[int, int], str] | None = None,
     ):
         """Build the read-only whole-book evidence index.
         target_overrides maps chapter.index/text_index pairs to shadow translations visible
         only in this index. Uncovered locations use formal chapter targets, preserving
-        ordinary calls and persisted data.
+        ordinary calls and persisted data. Only a resolved Japanese source exposes readings;
+        legacy callers without source_lang omit them rather than guessing from the target.
         """
+        self.source_lang = source_lang
         flattened: list[SegmentRef] = []
         by_location: dict[tuple[int, int], int] = {}
         chapter_digests: dict[int, str] = {}
@@ -82,11 +79,11 @@ class BookEvidenceIndex:
         self._alias_lookup: dict[str, list[GlossaryTerm]] = {}
         for term in self.terms:
             self._exact_source_lookup[term.source] = term
-            normalized_source = _normalized(term.source)
+            normalized_source = normalize_value(term.source)
             if normalized_source:
                 self._source_lookup.setdefault(normalized_source, []).append(term)
             for alias in term.aliases:
-                normalized_alias = _normalized(alias)
+                normalized_alias = normalize_value(alias)
                 if normalized_alias:
                     self._alias_lookup.setdefault(normalized_alias, []).append(term)
         self._occurrence_cache: dict[str, tuple[SegmentRef, ...]] = {}
@@ -103,7 +100,7 @@ class BookEvidenceIndex:
         exact = self._exact_source_lookup.get(stripped)
         if exact is not None:
             return exact, []
-        normalized = _normalized(stripped)
+        normalized = normalize_value(stripped)
         source_matches = self._source_lookup.get(normalized, [])
         unique_sources = {term.source: term for term in source_matches}
         if len(unique_sources) == 1:
@@ -128,7 +125,7 @@ class BookEvidenceIndex:
         if not canonical:
             return "", (), []
         cache_key = (
-            f"term:{term.source}" if term is not None else f"literal:{_normalized(canonical)}"
+            f"term:{term.source}" if term is not None else f"literal:{normalize_value(canonical)}"
         )
         with self._cache_lock:
             cached = self._occurrence_cache.get(cache_key)
@@ -216,14 +213,13 @@ class BookEvidenceIndex:
             "invalid_selectors": invalid,
         }
 
-    @staticmethod
-    def _term_evidence(term: GlossaryTerm) -> dict[str, Any]:
+    def _term_evidence(self, term: GlossaryTerm) -> dict[str, Any]:
         """Condense one glossary term into citable read-only evidence."""
         return {
             "ref": _glossary_ref(term.source),
             "source": _clip(term.source, 256),
             "target": _clip(term.target, 256),
-            "reading": _clip(term.reading, 256),
+            **({"reading": _clip(term.reading, 256)} if self.source_lang == "ja" else {}),
             "type": _clip(term.type, 64),
             "gender": _clip(term.gender, 64),
             "aliases": [_clip(alias, 256) for alias in term.aliases[:16]],

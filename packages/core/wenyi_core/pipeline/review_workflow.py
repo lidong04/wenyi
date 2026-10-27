@@ -12,11 +12,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Callable
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
+from ..events import ProgressFn
 from ..glossary.store import GlossaryStore, GlossaryTerm
-from ..i18n.resources import prompt_fingerprint
 from ..llm.retrying import is_resumable_provider_interrupt
 from ..review.evidence import BookEvidenceIndex
 from ..review.models import ReviewOutcome
@@ -24,6 +24,7 @@ from ..review.run_store import ReviewRunStore
 from ..review.session import ReviewPolicy, content_digest, review_overlay_digest
 from ..storage.protocol import Storage
 from . import review_results
+from .language_policies import persist_plan
 from .review_checkpoint import ReviewCheckpoint, ReviewInputs
 from .review_chunks import ReviewChunkService
 from .review_rounds import ReviewRoundService
@@ -31,8 +32,6 @@ from .runstore import STATUS_DONE
 
 if TYPE_CHECKING:
     from .runtime import PipelineRuntime
-
-ProgressFn = Callable[[int, int, str], None]
 
 
 class ReviewService:
@@ -64,7 +63,9 @@ class ReviewService:
             "source_lang": self._runtime.config.source_lang,
             "target_lang": self._runtime.config.target_lang,
             "honorific_strategy": self._runtime.config.honorific_strategy,
-            "prompt_fingerprint": prompt_fingerprint(),
+            "language_policy": self._runtime.config.language_policy("review").fingerprint,
+            "review_glossary_policy": "full",
+            "review_glossary_reading_source": "ja",
             "review_output_retries": self._runtime.config.pipeline.review_output_retries,
             "review_agent_loop": self._runtime.config.pipeline.review_agent_loop,
             "inference": inference_snapshot(
@@ -90,15 +91,18 @@ class ReviewService:
 
     @staticmethod
     def _review_glossary_fingerprint(terms: list[GlossaryTerm]) -> str:
-        """Fingerprint glossary content so changed terms invalidate completed review reuse."""
-        ordered = sorted((term.source, term.target, term.type) for term in terms)
-        return hashlib.sha256(json.dumps(ordered, ensure_ascii=False).encode("utf-8")).hexdigest()
+        """Bind reuse and resume to the full ordered prompt and evidence glossary."""
+        snapshot = [asdict(term) for term in terms]
+        return hashlib.sha256(
+            json.dumps(snapshot, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
 
     def _review_skip_eligible(
         self,
         store: Storage,
         latest: dict[str, Any],
         terms: list[GlossaryTerm],
+        config_snapshot: dict[str, Any],
     ) -> bool:
         """Reuse a completed review only when content, configuration and glossary all match."""
         review_id = latest.get("review_id")
@@ -111,7 +115,7 @@ class ReviewService:
         saved_glossary = metadata.get("glossary_fingerprint")
         return (
             isinstance(saved_config, dict)
-            and saved_config == self._review_config_snapshot()
+            and saved_config == config_snapshot
             and isinstance(saved_glossary, str)
             and saved_glossary == self._review_glossary_fingerprint(terms)
         )
@@ -153,6 +157,16 @@ class ReviewService:
             progress(0, 0, "Restoring review checkpoint…")
         analysis = store.load_analysis() or {}
         reviewed_content_digest = content_digest(loaded)
+        config_snapshot = self._review_config_snapshot()
+        # Bind the whole run (including round-scoped fixer traces) to effective guidance.
+        config_snapshot["guidance"] = {
+            "style": self._runtime.analyzer.style_brief(analysis),
+            "book_synopsis": str(analysis.get("book_synopsis", "") or ""),
+            "chapter_digests": {
+                str(chapter.index): str(chapter.meta.get("source_digest", "") or "")
+                for chapter in loaded
+            },
+        }
 
         # Reuse completed review results when content, configuration and glossary fingerprints match.
         latest_completed = store.load_latest_review_result()
@@ -160,7 +174,7 @@ class ReviewService:
             latest_completed is not None
             and latest_completed.get("status") == "completed"
             and latest_completed.get("reviewed_content_digest") == reviewed_content_digest
-            and self._review_skip_eligible(store, latest_completed, all_terms)
+            and self._review_skip_eligible(store, latest_completed, all_terms, config_snapshot)
         ):
             store.log_event("review_skipped", reason="already_completed")
             return ReviewOutcome(
@@ -175,7 +189,7 @@ class ReviewService:
         debug = ReviewRunStore.find_resumable(
             store.run_dir,
             reviewed_content_digest,
-            config=self._review_config_snapshot(),
+            config=config_snapshot,
             glossary_fingerprint=self._review_glossary_fingerprint(all_terms),
             storage=store,
         )
@@ -195,7 +209,7 @@ class ReviewService:
                 "target_lang": self._runtime.config.target_lang,
                 "chapter_count": len(loaded),
                 "total_segments": total,
-                "config": self._review_config_snapshot(),
+                "config": config_snapshot,
                 "glossary_fingerprint": self._review_glossary_fingerprint(all_terms),
             },
         )
@@ -221,6 +235,7 @@ class ReviewService:
         receives revised shadow text without previous issue descriptions. Persist summaries,
         usage and formal events at session end.
         """
+        persist_plan(store, self._runtime.config.language_policy("review"))
         opened = self._open_session(store, all_terms, progress)
         if isinstance(opened, ReviewOutcome):
             return opened
@@ -256,6 +271,7 @@ class ReviewService:
                     loaded,
                     all_terms,
                     analysis,
+                    source_lang=self._runtime.config.source_lang,
                     target_overrides=state.target_overrides,
                 )
                 with debug.round_scope(review_round):

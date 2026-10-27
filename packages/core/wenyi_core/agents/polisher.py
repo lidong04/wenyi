@@ -8,7 +8,6 @@ polishing cannot drop paragraphs.
 from __future__ import annotations
 
 from ..glossary.store import GlossaryTerm
-from ..i18n.prompts import render
 from . import prompts
 from .base import Agent, Messages
 
@@ -26,12 +25,12 @@ class Polisher(Agent):
         if not targets:
             return []
         n = len(targets)
-        system = render("polisher_system", src=self.src, tgt=self.tgt, n=n)
-        user = render(
+        system = self.render("polisher_system", src=self.src, tgt=self.tgt, n=n)
+        user = self.render(
             "polisher_user",
             src=self.src,
             tgt=self.tgt,
-            glossary=prompts.render_glossary(glossary_terms or []),
+            glossary=prompts.render_glossary(glossary_terms or [], source_lang=self.src),
             style=style or "(none)",
             n=n,
             numbered_target=prompts.numbered(targets),
@@ -56,7 +55,7 @@ class Polisher(Agent):
         """
         if n <= 0 or len(turn) < 3:
             return None
-        continue_user = render(
+        continue_user = self.render(
             "polisher_continue_user",
             src=self.src,
             tgt=self.tgt,

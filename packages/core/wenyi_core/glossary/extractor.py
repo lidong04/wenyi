@@ -12,7 +12,6 @@ from dataclasses import dataclass, replace
 from ..agents import prompts
 from ..agents.base import Agent
 from ..config import Config
-from ..i18n.prompts import render
 from ..llm.base import LLMClient
 from ..storage.protocol import Storage
 from .store import (
@@ -89,12 +88,12 @@ class GlossaryExtractor(Agent):
         self, source_text: str, target_text: str, existing: list[GlossaryTerm]
     ) -> list[GlossaryTerm]:
         """Extract valid terms from source/target pairs and normalize model field types."""
-        system = render("glossary_extractor_system", src=self.src, tgt=self.tgt)
-        user = render(
+        system = self.render("glossary_extractor_system", src=self.src, tgt=self.tgt)
+        user = self.render(
             "glossary_extractor_user",
             src=self.src,
             tgt=self.tgt,
-            glossary=prompts.render_glossary(existing),
+            glossary=prompts.render_glossary(existing, source_lang=self.src),
             source=source_text,
             target=target_text,
         )
@@ -112,7 +111,7 @@ class GlossaryExtractor(Agent):
                 GlossaryTerm(
                     source=source,
                     target=target,
-                    reading=_text(d.get("reading")),
+                    reading=_text(d.get("reading")) if self.src == "ja" else "",
                     type=_text(d.get("type"), TYPE_TERM),
                     gender=gender,
                     aliases=[alias for a in aliases if (alias := _text(a))],
@@ -178,8 +177,8 @@ class GlossaryExtractor(Agent):
                 }
             )
 
-        system = render("glossary_history_system", src=self.src, tgt=self.tgt)
-        user = render(
+        system = self.render("glossary_history_system", src=self.src, tgt=self.tgt)
+        user = self.render(
             "glossary_history_user",
             src=self.src,
             tgt=self.tgt,

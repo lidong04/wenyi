@@ -16,6 +16,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..config import Config
+from ..events import ProgressFn
 from ..storage.protocol import Storage
 from .annotations import AnnotationService
 from .finalization import AssemblyService, ReportService
@@ -25,8 +26,6 @@ from .review_workflow import ReviewService
 from .runtime import LLMClient, PipelineRuntime
 from .translation import TranslationService
 
-ProgressFn = Callable[[int, int, str], None]
-
 
 class Orchestrator:
     """Assemble runtime/services and control only step routing and lock scopes."""
@@ -35,13 +34,20 @@ class Orchestrator:
     ALL_STEPS = ("translate", "review", "report", "assemble")
 
     def __init__(
-        self, config: Config, client: LLMClient | None = None, storage: Storage | None = None
+        self,
+        config: Config,
+        client: LLMClient | None = None,
+        storage: Storage | None = None,
+        *,
+        mineru_token_resolver: Callable[[], str | None] | None = None,
     ):
         """Assemble shared runtime and domain services without domain I/O."""
         self.config = config
         self._runtime = PipelineRuntime(config, client=client, storage=storage)
         self.client = self._runtime.client
-        self._preparation = PreparationService(self._runtime)
+        self._preparation = PreparationService(
+            self._runtime, mineru_token_resolver=mineru_token_resolver
+        )
         self._annotations = AnnotationService(self._runtime)
         self._translation = TranslationService(self._runtime, self._annotations)
         self._review = ReviewService(self._runtime)
@@ -62,15 +68,15 @@ class Orchestrator:
         progress: ProgressFn | None = None,
     ) -> Storage:
         """Complete all preparation without translating body text.
-        Parse the document, detect language, analyze style and initial terms, and optionally
-        prescan chapters and synthesize a synopsis. Every stage resumes by reusing persisted
-        results.
+        Parse the document, detect language, optionally prescan chapters, analyze style and
+        character voices, and optionally synthesize a synopsis. Initialized runs reuse persisted
+        results; incomplete initialization is rebuilt on retry.
         """
         with self._runtime.track_workflow("prepare"):
             store = self._preparation.prepare(input_path, progress=progress)
             with store.lock():
-                self._preparation.activate(store)
                 try:
+                    self._preparation.activate(store, phase="translation")
                     self._preparation.ensure_understanding(store, progress=progress)
                     self._runtime.log_event(
                         store,
@@ -109,21 +115,26 @@ class Orchestrator:
         """Restore languages, validate chapter selection, build the synopsis and delegate
         translation.
         """
-        manifest = self._preparation.activate(store)
-        chapter_indices = {chapter.get("index") for chapter in manifest.get("chapters", [])}
-        if only_chapter is not None and only_chapter not in chapter_indices:
-            available = sorted(index for index in chapter_indices if isinstance(index, int))
-            valid_range = f"0–{available[-1]}" if available else "no translatable chapters"
-            raise ValueError(
-                f"Chapter index {only_chapter} does not exist; available range: {valid_range}"
+        try:
+            manifest = store.load_manifest()
+            chapter_indices = {chapter.get("index") for chapter in manifest.get("chapters", [])}
+            if only_chapter is not None and only_chapter not in chapter_indices:
+                available = sorted(index for index in chapter_indices if isinstance(index, int))
+                valid_range = f"0–{available[-1]}" if available else "no translatable chapters"
+                raise ValueError(
+                    f"Chapter index {only_chapter} does not exist; available range: {valid_range}"
+                )
+            self._preparation.activate(store, phase="translation")
+            book_synopsis = self._preparation.ensure_understanding(store, progress=progress)
+            return self._translation.run(
+                store,
+                book_synopsis=book_synopsis,
+                only_chapter=only_chapter,
+                progress=progress,
             )
-        book_synopsis = self._preparation.ensure_understanding(store, progress=progress)
-        return self._translation.run(
-            store,
-            book_synopsis=book_synopsis,
-            only_chapter=only_chapter,
-            progress=progress,
-        )
+        finally:
+            # Prescan can stop before translation's own usage checkpoint is reached.
+            self._runtime.flush_usage(store, scope="translate")
 
     def run_review(
         self,

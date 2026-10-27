@@ -6,118 +6,60 @@ creates and drops its own schema; no existing project rows are touched.
 
 from __future__ import annotations
 
-import os
+import json
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, cast
 
-import psycopg
 import pytest
-from psycopg import sql
-from psycopg_pool import ConnectionPool
+from api_test_support import document, initialize
 from type_helpers import must
 from wenyi_api.storage_pg import PostgresStorage, ProjectBusyError
+from wenyi_core.config import Config
 from wenyi_core.glossary.store import GlossaryTerm
-from wenyi_core.ingest.models import Chapter, Document, Segment
+from wenyi_core.llm.providers.fake import FakeClient
 from wenyi_core.llm.usage import empty_usage
+from wenyi_core.pipeline.precision import PrecisionBatchExecutor
 from wenyi_core.pipeline.runstore import source_sha256
-from wenyi_core.storage.file import FileStorage
+from wenyi_core.pipeline.translation import TranslationService
+from wenyi_core.pipeline.translation_batch import BatchPlan
 
 
-@pytest.fixture(scope="module")
-def pg_pool():
-    dsn = os.environ.get("WENYI_TEST_DATABASE_URL")
-    if not dsn:
-        pytest.skip("Set WENYI_TEST_DATABASE_URL for real PostgreSQL storage tests")
-    schema = "test_wenyi_" + uuid.uuid4().hex
-    with psycopg.connect(dsn, autocommit=True) as admin:
-        admin.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public")
-        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-    pool = ConnectionPool(
-        dsn,
-        min_size=1,
-        max_size=8,
-        open=True,
-        kwargs={"options": f"-c search_path={schema},public", "client_encoding": "UTF8"},
+def test_precision_candidates_and_guarded_publication_use_backend_storage(storage, tmp_path):
+    initialize(storage, tmp_path)
+    chapter = storage.load_chapter(0)
+    chapter.segments[0].target = None
+    chapter.segments[0].target_before_polish = None
+    storage.save_chapter(chapter)
+    config = Config.from_dict(
+        {
+            "language": {"source": "en", "target": "zh"},
+            "llm": {"preset": "fake"},
+            "pipeline": {"translation_mode": "best_of_three", "precision_concurrency": 1},
+        }
     )
-    pool.wait()
-    try:
-        schema_sql = Path(__file__).parents[1] / "wenyi_api" / "db" / "schema.sql"
-        with pool.connection() as conn:
-            conn.execute(cast(Any, schema_sql.read_text(encoding="utf-8")))
-        yield pool
-    finally:
-        pool.close()
-        with psycopg.connect(dsn, autocommit=True) as admin:
-            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+    plan = BatchPlan.capture(0, 0, chapter.text_segments, [], "", "", "", "", [[]], "")
 
+    def handler(*_):
+        return json.dumps({"translations": ["确认的自然译文"]})
 
-@pytest.fixture
-def pg_storage(pg_pool, tmp_path):
-    pid = uuid.uuid4().hex
-    with pg_pool.connection() as conn:
-        conn.execute(
-            "INSERT INTO projects(id,name,source_lang,target_lang) VALUES(%s,'test','en','zh')",
-            (pid,),
-        )
-    return PostgresStorage(pid, pg_pool, run_dir=str(tmp_path / "resources"))
-
-
-@pytest.fixture(params=["file", "postgres"])
-def storage(request, tmp_path):
-    if request.param == "postgres":
-        result = request.getfixturevalue("pg_storage")
-    else:
-        result = FileStorage(str(tmp_path / "file-state"))
-    yield result
-    result.close()
-
-
-def document(tmp_path):
-    source = tmp_path / "source.txt"
-    source.write_text("Book\nOriginal paragraph", encoding="utf-8")
-    return Document(
-        title="Book",
-        fmt="text",
-        source_lang="en",
-        target_lang="zh",
-        source_path=str(source),
-        meta={
-            "format_metadata": {"nested": [1, 2]},
-            "epub_annotation_contexts": {"note": {"source": "Original note"}},
-        },
-        chapters=[
-            Chapter(
-                index=0,
-                title="Chapter",
-                href="chapter.xhtml",
-                template="<p id='a'></p>",
-                meta={"toc_entry_id": "toc-a"},
-                segments=[
-                    Segment(
-                        index=0,
-                        source="Original paragraph",
-                        target="润色译文",
-                        target_before_polish="原始译文",
-                        anchor="a",
-                        resource_href="chapter.xhtml",
-                        meta={"style": {"bold": True}},
-                    )
-                ],
-            )
-        ],
-    )
-
-
-def initialize(storage, tmp_path):
-    doc = document(tmp_path)
-    digest = source_sha256(doc.source_path)
-    storage.begin_initialization(digest)
-    manifest = storage.stage_document(doc, source_hash=digest)
-    storage.save_manifest(manifest)
-    storage.finish_initialization()
-    return doc, digest
+    client = FakeClient(handler=handler)
+    executor = PrecisionBatchExecutor(client, config)
+    result = executor.execute(plan, storage)
+    assert storage.load_chapter(0).segments[0].target is None
+    assert storage.read_artifact(f"{result.precision_key}/publication.json")["status"] == "ready"
+    TranslationService.save_precision_batch(storage, plan, result)
+    executor.mark_published(storage, result)
+    saved = storage.load_chapter(0).segments[0]
+    assert saved.target == "确认的自然译文"
+    assert saved.anchor == "a"
+    assert saved.meta == {"style": {"bold": True}}
+    assert saved.resource_href == "chapter.xhtml"
+    assert executor.execute(plan, storage) == result
+    assert len(client.calls) == 4
+    assert all(call["max_tokens"] is None for call in client.calls)
+    if isinstance(storage, PostgresStorage):
+        assert not Path(storage.run_dir, "precision").exists()
 
 
 def test_initialization_marker_and_complete_metadata_round_trip(storage, tmp_path):
@@ -566,8 +508,8 @@ def test_postgres_dal_config_job_identity_errors_and_review_summary(
     dal.set_project_source(
         pid, doc.source_path, "中文书名", source_sha256=digest, source_meta={"parsed": True}
     )
-    assert dal.get_project_config(pid) == config
     project = must(dal.get_project(pid))
+    assert project["config"] == config
     assert project["initialized"] and project["source_sha256"] == digest
     assert project["source_meta"] == {"parsed": True}
     dal.set_project_status(pid, "error", error="Service failed")

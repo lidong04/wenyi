@@ -6,9 +6,23 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from wenyi_core.config import Config
+import yaml
+from pydantic import ValidationError
+from wenyi_core.config import _DEFAULT_CONFIG_YAML, Config
 from wenyi_core.llm.registry import provider_spec
 from wenyi_core.llm.routing import resolve_routes
+
+
+def _flatten_defaults(values, prefix=""):
+    """Map nested configuration onto ``section.key`` paths to compare it as a flat set."""
+    flat = {}
+    for key, value in values.items():
+        path = f"{prefix}{key}"
+        if isinstance(value, dict):
+            flat.update(_flatten_defaults(value, f"{path}."))
+        else:
+            flat[path] = value
+    return flat
 
 
 class TestConfigFileCreation(unittest.TestCase):
@@ -48,6 +62,8 @@ class TestConfigFileCreation(unittest.TestCase):
             self.assertIn("  punctuation_normalize: true", generated)
             self.assertNotIn("\npunctuation:\n", generated)
             self.assertTrue(cfg.pipeline.review)
+            self.assertEqual(cfg.pipeline.align_retry_limit, 2)
+            self.assertIn("  align_retry_limit: 2", generated)
             self.assertTrue(cfg.pipeline.polish)
             self.assertTrue(cfg.pipeline.annotation_alignment)
             self.assertEqual(cfg.pipeline.review_concurrency, 4)
@@ -66,6 +82,14 @@ class TestConfigFileCreation(unittest.TestCase):
             self.assertIn("max_tokens_per_batch: 1800", generated)
             self.assertIn("max_tokens_per_segment: 1200", generated)
             self.assertNotIn("max_chars_per_batch", generated)
+            self.assertNotIn("glossary_scope", generated)
+            self.assertNotIn("glossary_scope", cfg.pipeline.model_dump())
+
+    def test_removed_glossary_scope_is_rejected(self):
+        for scope in ("chapter", "full", None):
+            with self.subTest(scope=scope):
+                with self.assertRaisesRegex(ValidationError, "glossary_scope"):
+                    Config.from_dict({"pipeline": {"glossary_scope": scope}})
 
     def test_removed_segment_char_keys_are_rejected(self):
         with self.assertRaises(Exception):
@@ -136,6 +160,31 @@ class TestConfigFileCreation(unittest.TestCase):
         extra = cfg.llm.providers["local"].model_extra
         assert extra is not None
         self.assertEqual(extra["reasoning_style"], "deepseek")
+
+
+class TestShippedDefaultConfig(unittest.TestCase):
+    """The committed config.yaml must track the generated default template."""
+
+    def test_root_config_matches_builtin_template(self):
+        root = Path(__file__).resolve().parents[3] / "config.yaml"
+        shipped = _flatten_defaults(yaml.safe_load(root.read_text(encoding="utf-8")))
+        template = _flatten_defaults(yaml.safe_load(_DEFAULT_CONFIG_YAML))
+
+        drift = {
+            "missing from config.yaml": sorted(set(template) - set(shipped)),
+            "missing from the built-in template": sorted(set(shipped) - set(template)),
+            "different value": {
+                key: (shipped[key], template[key])
+                for key in sorted(set(shipped) & set(template))
+                if shipped[key] != template[key]
+            },
+        }
+
+        self.assertEqual(
+            {kind: found for kind, found in drift.items() if found},
+            {},
+            "config.yaml at the repository root drifted from the built-in default template",
+        )
 
 
 if __name__ == "__main__":

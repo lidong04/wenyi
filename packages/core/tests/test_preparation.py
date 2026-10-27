@@ -2,12 +2,247 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
+import pytest
+from wenyi_core.config import Config
+from wenyi_core.glossary.store import GlossaryTerm
 from wenyi_core.i18n.languages import normalize_language
+from wenyi_core.llm.providers.fake import FakeClient
+from wenyi_core.pipeline.orchestrator import Orchestrator
 from wenyi_core.pipeline.preparation import PreparationService
+from wenyi_core.pipeline.runstore import slugify, source_sha256
+from wenyi_core.storage.file import FileStorage
+
+from tests.fake_llm import routing_handler
+from tests.pipeline_fixtures import fake_pipeline_config
+from tests.sample_data import write_sample_epub, write_sample_txt
+
+
+class TestLocateExistingStore(unittest.TestCase):
+    def test_epub_locate_uses_peek_title_without_load_document(self):
+        """Locate EPUB state through OPF title only, avoiding repeated full-book annotation."""
+        with tempfile.TemporaryDirectory() as directory:
+            epub = os.path.join(directory, "sample.epub")
+            write_sample_epub(epub)
+            digest = source_sha256(epub)
+            # Use the same slug rule for the sample EPUB's OPF title as preparation does.
+            store = FileStorage(
+                os.path.join(directory, "state", slugify("サンプル小説"), "targets", "zh"),
+            )
+            store.save_manifest(
+                {
+                    "title": "サンプル小説",
+                    "fmt": "epub",
+                    "source_path": epub,
+                    "source_sha256": digest,
+                    "source_lang": "ja",
+                    "target_lang": "zh",
+                    "chapters": [],
+                }
+            )
+            cfg = fake_pipeline_config(os.path.join(directory, "state"))
+            orch = Orchestrator(cfg, client=FakeClient())
+
+            with patch(
+                "wenyi_core.pipeline.preparation.load_document",
+                side_effect=AssertionError("locate 不应调用 load_document"),
+            ):
+                located = orch._preparation.locate_existing(epub)
+
+            self.assertEqual(located.run_dir, store.run_dir)
+            self.assertTrue(located.exists())
+
+
+def _preparation_inputs(tmp_path, book_understanding=True):
+    source = tmp_path / "book.txt"
+    write_sample_txt(str(source))
+    config = Config.from_dict(
+        {
+            "language": {"source": "ja", "target": "zh"},
+            "llm": {"preset": "fake"},
+            "pipeline": {
+                "book_understanding": book_understanding,
+                "prescan_concurrency": 2,
+                "review": False,
+                "polish": False,
+            },
+            "paths": {"state_dir": str(tmp_path / "state")},
+        }
+    )
+    return source, config, FileStorage(str(tmp_path / "run"))
+
+
+@pytest.mark.parametrize("entry_point", ["prepare", "prepare_for_translation", "run"])
+@pytest.mark.parametrize("book_understanding", [False, True])
+def test_chapter_prescan_finishes_before_style_analysis(tmp_path, entry_point, book_understanding):
+    source, config, store = _preparation_inputs(tmp_path, book_understanding)
+    digest = "DIGEST-ONLY-CONTENT"
+
+    def handler(messages, tier, json_mode):
+        system = messages[0]["content"]
+        if "chapter digest writer" in system:
+            return digest
+        if "pre-translation analyst" in system:
+            assert not store.exists(), "The initialization manifest must commit last"
+            chapter = store.load_chapter(0)
+            assert bool(chapter.meta.get("source_digest")) == book_understanding
+            assert digest not in messages[-1]["content"], (
+                "Style analysis still reads source samples"
+            )
+        return routing_handler(messages, tier, json_mode)
+
+    client = FakeClient(handler=handler)
+    getattr(Orchestrator(config, client=client, storage=store), entry_point)(str(source))
+    operations = [call["operation"] for call in client.calls]
+    style_position = operations.index("analysis.style")
+    chapter_calls = [i for i, operation in enumerate(operations) if operation == "synopsis.chapter"]
+    if book_understanding:
+        assert len(chapter_calls) == len(store.load_manifest()["chapters"])
+        assert max(chapter_calls) < style_position
+        if entry_point != "prepare":
+            assert style_position < operations.index("synopsis.book")
+    else:
+        assert chapter_calls == []
+        assert "synopsis.book" not in operations
+    assert store.exists()
+
+
+@pytest.mark.parametrize("entry_point", ["prepare", "prepare_for_translation"])
+@pytest.mark.parametrize("book_understanding", [False, True])
+def test_preparation_does_not_seed_glossary(tmp_path, entry_point, book_understanding):
+    source, config, store = _preparation_inputs(tmp_path, book_understanding)
+
+    def handler(messages, tier, json_mode):
+        if "pre-translation analyst" in messages[0]["content"]:
+            return json.dumps(
+                {
+                    "style_guide": "Keep a restrained voice.",
+                    "characters": [
+                        {
+                            "source": "綾小路",
+                            "target": "Suggested name",
+                            "reading": "あやのこうじ",
+                            "gender": "male",
+                            "note": "Speaks tersely.",
+                        }
+                    ],
+                    "terms": [{"source": "学校", "target": "School", "type": "place"}],
+                }
+            )
+        return routing_handler(messages, tier, json_mode)
+
+    client = FakeClient(handler=handler)
+    getattr(Orchestrator(config, client=client, storage=store), entry_point)(str(source))
+    assert store.all_terms() == []
+    analysis = store.load_analysis()
+    assert analysis is not None
+    assert analysis["style_guide"] == "Keep a restrained voice."
+    assert analysis["characters"] == [
+        {"source": "綾小路", "gender": "male", "note": "Speaks tersely."}
+    ]
+    assert "terms" not in analysis
+    assert not any(call["operation"].startswith("glossary.") for call in client.calls)
+    assert all(
+        segment.target is None
+        for row in store.load_manifest()["chapters"]
+        for segment in store.load_chapter(row["index"]).segments
+    )
+
+    # Glossary imports into initialized projects remain intact on repeated preparation.
+    store.upsert_term(
+        GlossaryTerm(
+            source="綾小路", target="Custom name", reading="Manual reading", note="Imported"
+        )
+    )
+    original_terms = store.all_terms()
+    resumed_client = FakeClient(handler=handler)
+    getattr(Orchestrator(config, client=resumed_client, storage=store), entry_point)(str(source))
+    assert store.all_terms() == original_terms
+    assert resumed_client.calls == []
+
+
+def test_synopsis_interrupt_resumes_without_repeating_prescan_or_style(tmp_path):
+    source, config, store = _preparation_inputs(tmp_path)
+
+    def handler(messages, tier, json_mode):
+        if "whole-book synopsis writer" in messages[0]["content"]:
+            raise KeyboardInterrupt("during book synopsis")
+        return routing_handler(messages, tier, json_mode)
+
+    with pytest.raises(KeyboardInterrupt, match="book synopsis"):
+        Orchestrator(
+            config, client=FakeClient(handler=handler), storage=store
+        ).prepare_for_translation(str(source))
+    assert store.exists()
+    analysis = store.load_analysis()
+    chapters = [store.load_chapter(row["index"]) for row in store.load_manifest()["chapters"]]
+    assert all(chapter.meta.get("source_digest") for chapter in chapters)
+
+    client = FakeClient(handler=routing_handler)
+    Orchestrator(config, client=client, storage=store).prepare_for_translation(str(source))
+    assert [call["operation"] for call in client.calls] == ["synopsis.book"]
+    resumed_analysis = store.load_analysis() or {}
+    metadata = resumed_analysis.pop("book_synopsis_meta")
+    assert metadata["version"] == 1
+    assert len(metadata["inputs_sha256"]) == 64
+    assert resumed_analysis == {
+        **(analysis or {}),
+        "book_synopsis": "全书概览：主线与人物关系，整体基调。",
+    }
+    assert [store.load_chapter(chapter.index) for chapter in chapters] == chapters
+
+    cached_client = FakeClient(handler=routing_handler)
+    Orchestrator(config, client=cached_client, storage=store).prepare_for_translation(str(source))
+    assert cached_client.calls == []
+
+
+def test_style_failure_after_prescan_keeps_initialization_uncommitted(tmp_path):
+    source, config, store = _preparation_inputs(tmp_path)
+
+    def handler(messages, tier, json_mode):
+        if "pre-translation analyst" in messages[0]["content"]:
+            assert store.load_chapter(0).meta.get("source_digest")
+            raise RuntimeError("style analysis failed")
+        return routing_handler(messages, tier, json_mode)
+
+    with pytest.raises(RuntimeError, match="style analysis failed"):
+        Orchestrator(config, client=FakeClient(handler=handler), storage=store).prepare(str(source))
+    assert not store.exists()
+    assert store.load_analysis() is None
+
+    client = FakeClient(handler=routing_handler)
+    Orchestrator(config, client=client, storage=store).prepare_for_translation(str(source))
+    operations = [call["operation"] for call in client.calls]
+    assert operations.count("synopsis.chapter") == len(store.load_manifest()["chapters"])
+    assert operations.index("synopsis.chapter") < operations.index("analysis.style")
+    assert store.exists()
+
+
+def test_required_prescan_failure_prevents_style_and_manifest_commit(tmp_path):
+    source, config, store = _preparation_inputs(tmp_path)
+
+    def handler(messages, tier, json_mode):
+        if (
+            "chapter digest writer" in messages[0]["content"]
+            and "放課後" in messages[-1]["content"]
+        ):
+            return ""
+        return routing_handler(messages, tier, json_mode)
+
+    client = FakeClient(handler=handler)
+    with pytest.raises(ValueError, match="Chapter digests.*1"):
+        Orchestrator(config, client=client, storage=store).prepare_for_translation(str(source))
+    assert not store.exists()
+    assert store.load_analysis() is None
+    assert store.load_chapter(0).meta["source_digest_complete"] is True
+    assert not store.load_chapter(1).meta.get("source_digest")
+    assert [call["operation"] for call in client.calls] == ["synopsis.chapter"] * 2
+    assert all(segment.target is None for segment in store.load_chapter(0).segments)
 
 
 class TestSampleText(unittest.TestCase):
